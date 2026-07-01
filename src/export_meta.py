@@ -156,15 +156,35 @@ def main():
         "floor_height": floor_h, "ceiling_height": ceil_h,
         "floor_color": [float(x) for x in floor_col], "ceiling_color": [float(x) for x in ceil_col],
     }
+    # Walk path direction/extent from the FULL cloud's principal axis (stable), but the
+    # path itself follows a LOCAL centroid of floor-level points in a sliding window
+    # along that axis, so it curves to trace the room's actual floor footprint instead
+    # of being a rigid straight line cutting through furniture/walls.
     c2 = uv.mean(0)
     evals, evecs = np.linalg.eigh((uv - c2).T @ (uv - c2))
     axis = evecs[:, -1]                                   # principal (longest) direction
-    t = (uv - c2) @ axis
-    lo, hi = np.percentile(t, [4, 96])
+    t_full = (uv - c2) @ axis
+    lo, hi = np.percentile(t_full, [4, 96])
+
+    floor_mask = np.abs(h - floor_h) < band * 4
+    floor_uv = uv[floor_mask]
+    t_floor = (floor_uv - c2) @ axis
+    window = (hi - lo) / 10
     eye = float(np.mean([np.asarray(sp["pos"]) @ up for sp in scan_points]))
+
+    raw_path = []
+    for s in np.linspace(lo, hi, 24):
+        near = np.abs(t_floor - s) < window
+        p2 = floor_uv[near].mean(0) if near.sum() >= 20 else c2 + axis * s
+        raw_path.append(p2)
+    raw_path = np.array(raw_path)
+    # light smoothing so per-step floor-density noise doesn't make the curve jagged
+    kernel = np.array([0.2, 0.6, 0.2])
+    smoothed = raw_path.copy()
+    smoothed[1:-1] = kernel[0] * raw_path[:-2] + kernel[1] * raw_path[1:-1] + kernel[2] * raw_path[2:]
+
     path = []
-    for s in np.linspace(lo, hi, 16):
-        p2 = c2 + axis * s
+    for p2 in smoothed:
         p3 = e1 * p2[0] + e2 * p2[1] + up * eye
         path.append({"pos": [float(x) for x in p3], "xy": [float(p2[0]), float(p2[1])]})
 

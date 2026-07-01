@@ -9,63 +9,17 @@ import { loadDepth, backprojectPixel, makeMarker } from './backproject.js';
 const statusEl = document.getElementById('status');
 const setStatus = (t) => { if (statusEl) statusEl.textContent = t; };
 
-let viewer = null, trust = null, minimap = null, meta = null, controls = null, inferredPlanes = null;
+let viewer = null, trust = null, minimap = null, meta = null, controls = null;
 let mode = 'photographic', selectedFrame = null, marker = null, currentView = null;
 const raycaster = new THREE.Raycaster();
-raycaster.params.Points.threshold = 0.06;
+raycaster.params.Points.threshold = 0.09;   // wider net so there's usually >1 candidate to search
 
-// Two planes (floor, ceiling) at the fitted heights, spanning the room footprint,
-// oriented perpendicular to world-up. Completion of known geometry, not hallucination
-// — textured with a diffusion-inpainted top-down completion when available
-// (src/inpaint_planes.py), else a flat fallback colour.
-function makeInferredPlanes(meta) {
-  const ip = meta.inferred_planes;
-  const e1 = new THREE.Vector3(...meta.floor_basis.e1);
-  const e2 = new THREE.Vector3(...meta.floor_basis.e2);
-  const up = new THREE.Vector3(...meta.world_up);
-  // Basis matrix (e1, e2, up) as columns: local plane +X -> e1, +Y -> e2, +Z -> up.
-  // (setFromUnitVectors alone only fixes +Z->up, leaving an undetermined twist about
-  // that axis — wrong once the planes carry an oriented texture, not just flat colour.)
-  const basis = new THREE.Matrix4().makeBasis(e1, e2, up);
-  const q = new THREE.Quaternion().setFromRotationMatrix(basis);
-
-  const rb = meta.reconstructed_bounds;
-  let bounds = ip.plane_bounds;                // present once inpaint_planes.py has run
-  if (!bounds) {                                // fallback: pad reconstructed_bounds about its centre
-    const cu0 = (rb.min[0] + rb.max[0]) / 2, cw0 = (rb.min[1] + rb.max[1]) / 2;
-    const hu = (rb.max[0] - rb.min[0]) / 2 * 1.15, hv = (rb.max[1] - rb.min[1]) / 2 * 1.15;
-    bounds = { min: [cu0 - hu, cw0 - hv], max: [cu0 + hu, cw0 + hv] };
-  }
-  const cu = (bounds.min[0] + bounds.max[0]) / 2, cw = (bounds.min[1] + bounds.max[1]) / 2;
-  const w = Math.max(0.5, bounds.max[0] - bounds.min[0]);
-  const h = Math.max(0.5, bounds.max[1] - bounds.min[1]);
-
-  const loader = new THREE.TextureLoader();
-  const group = new THREE.Group();
-  // Floor: classical (non-generative) inpainting extends the real observed texture
-  // (src/inpaint_planes.py). Ceiling: intentionally left flat — less predictable than
-  // a floor, so nearby-pixel extrapolation was judged not defensible there.
-  const specs = [
-    { height: ip.floor_height, color: ip.floor_color, tex: 'floor_texture.png', textured: ip.floor_textured },
-    { height: ip.ceiling_height, color: ip.ceiling_color, tex: 'ceiling_texture.png', textured: ip.ceiling_textured },
-  ];
-  for (const { height, color, tex, textured } of specs) {
-    const material = new THREE.MeshBasicMaterial({
-      color: new THREE.Color(...color), side: THREE.DoubleSide });
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), material);
-    mesh.position.copy(e1.clone().multiplyScalar(cu).addScaledVector(e2, cw).addScaledVector(up, height));
-    mesh.quaternion.copy(q);
-    group.add(mesh);
-    if (textured) {
-      loader.load('/scene/' + tex, (t) => {
-        t.flipY = false;              // our raster's row0 = v-min; three.js default would invert it
-        t.colorSpace = THREE.SRGBColorSpace;
-        material.map = t; material.color.set(0xffffff); material.needsUpdate = true;
-      });
-    }
-  }
-  return group;
-}
+// NOTE: floor completion is no longer a separate mesh/plane object. It's baked
+// directly into the exported Gaussian model as synthetic, floor-aligned splats
+// (src/inpaint_planes.py) — generative (SDXL-inpainting) fill of ONLY the pixels
+// with no real observation, merged into scene.ksplat itself. Marked confidence=0/
+// n_views=0 in trust.bin so the confidence/coverage modes still show it as
+// ungrounded. Ceiling is intentionally left unfilled.
 const clock = new THREE.Clock();
 const sceneCenter = new THREE.Vector3();
 
@@ -92,10 +46,7 @@ async function main() {
     useBuiltInControls: false,        // we drive the camera with WalkControls
   });
   window.__viewer = viewer;
-
-  setStatus('Loading full-quality splats (~168 MB)…');
-  await viewer.addSplatScene('/scene/scene.ksplat', { showLoadingUI: true, splatAlphaRemovalThreshold: 5 });
-  viewer.start();
+  viewer.start();   // start the render loop immediately, splats stream in async below
 
   const buf = await (await fetch('/scene/trust.bin')).arrayBuffer();
   trust = makeTrustCloud(buf);
@@ -105,24 +56,29 @@ async function main() {
   marker = makeMarker();
   viewer.threeScene.add(marker);
 
-  // Inferred floor + ceiling planes: the single horizontal pitch never sees them, so
-  // they reconstruct as garbage. They are trivially-known planes — fill them cleanly.
-  inferredPlanes = makeInferredPlanes(meta);
-  viewer.threeScene.add(inferredPlanes);
-
   // first-person walk controls; start standing in the cluster looking into the room
   controls = new WalkControls(viewer.camera, viewer.renderer.domElement, up, e1, e2);
   controls.setPose(meta.scan_points[0].pos, sceneCenter.clone().sub(new THREE.Vector3(...meta.scan_points[0].pos)).toArray());
   controls.onLockChange = (locked) => {
-    setStatus(locked ? MODE_HELP[mode] : 'Click the scene to walk · then WASD + mouse · Esc to release');
+    // Only announce the "unlocked" (escaped) state. Announcing "locked" here would
+    // race with onSceneClick's result message on the SAME click (WalkControls also
+    // requests pointer lock on an unlocked click) and clobber it a moment later.
+    if (!locked) setStatus('Click the scene to walk · then WASD + mouse · Esc to release');
     document.getElementById('crosshair').style.display = locked ? '' : 'none';
   };
 
   minimap = new Minimap(document.getElementById('minimap'), meta, navigateTo);
 
+  // Wire up interaction BEFORE the heavy splat load — WASD, minimap, and the
+  // click-to-inspect hook only need `trust` (already loaded above), not the splat
+  // mesh, so there's no reason to gate them behind a ~168 MB download.
   wireUI();
   wireClickHooks();
   drawLoop();
+  setStatus('Loading full-quality splats (~168 MB)… (walking + click-to-inspect already work)');
+
+  await viewer.addSplatScene('/scene/scene.ksplat', { showLoadingUI: true, splatAlphaRemovalThreshold: 5 });
+  if (viewer.splatMesh) viewer.splatMesh.visible = (mode === 'photographic');
   setStatus('Click the scene to walk · WASD + mouse-look · Space/Shift up/down · click the path to jump');
 }
 
@@ -138,9 +94,6 @@ function wireUI() {
   slider.addEventListener('input', () => {
     document.getElementById('cov-val').textContent = slider.value;
     if (trust) trust.material.uniforms.uCovThresh.value = parseFloat(slider.value);
-  });
-  document.getElementById('toggle-planes').addEventListener('change', (e) => {
-    if (inferredPlanes) inferredPlanes.visible = e.target.checked;
   });
 }
 
@@ -178,7 +131,7 @@ function navigateTo(pos3, tangent3) {
 function showViewThumb(v, label) {
   currentView = v;
   const box = document.getElementById('viewinfo');
-  box.style.display = '';
+  box.style.display = 'block';   // CSS sets display:none by default; '' doesn't override that
   document.getElementById('viewinfo-label').textContent =
     label || `nearest capture · scan-point ${v.frame} · yaw ${v.yaw}°`;
   document.getElementById('viewinfo-img').src = '/' + v.pano;
@@ -212,21 +165,40 @@ async function onPhotoClick(e) {
 // 3D -> photo: click a point on the reconstruction (crosshair, centre of screen — the
 // pointer is locked while walking), find which view supervised it, show that photo.
 function onSceneClick() {
-  if (!controls.locked || !trust) return;
-  raycaster.setFromCamera(new THREE.Vector2(0, 0), viewer.camera);   // screen-centre crosshair
-  const hits = raycaster.intersectObject(trust.points, false);
-  if (!hits.length) { setStatus('No reconstructed point at the crosshair.'); return; }
-  const idx = hits[0].index;
-  placeMarker(hits[0].point);
-  const viewId = trust.view[idx];
-  if (viewId < 0) { setStatus('This point was not clearly supervised by any single view.'); return; }
-  const v = meta.views.find((x) => x.id === viewId);
-  if (v) showViewThumb(v, `supervising view · scan-point ${v.frame} · yaw ${v.yaw}° (n_views=${trust.nviews[idx]})`);
+  try {
+    // No pointer-lock requirement: the crosshair always samples screen-centre
+    // regardless of cursor/lock state, so raycasting doesn't need it.
+    if (!trust) { setStatus('Trust data not loaded yet — try again in a moment.'); return; }
+    raycaster.setFromCamera(new THREE.Vector2(0, 0), viewer.camera);   // screen-centre crosshair
+    const hits = raycaster.intersectObject(trust.points, false);
+    if (!hits.length) { setStatus('No reconstructed point at the crosshair.'); return; }
+    // Take the closest hit for the MARKER (visually where you clicked), but for the
+    // supervising-view lookup, walk outward past any unsupervised floaters — sparse
+    // noise points sitting slightly in front of real geometry along the ray would
+    // otherwise win every time even though the surface behind them is well-supervised.
+    placeMarker(hits[0].point);
+    const hit = hits.find((h) => trust.view[h.index] >= 0);
+    if (!hit) { setStatus(`No clearly-supervised point near the crosshair (${hits.length} floater(s) only).`); return; }
+    const idx = hit.index;
+    const v = meta.views.find((x) => x.id === trust.view[idx]);
+    if (v) showViewThumb(v, `supervising view · scan-point ${v.frame} · yaw ${v.yaw}° (n_views=${trust.nviews[idx]})`);
+    else setStatus(`Hit view id ${trust.view[idx]} but couldn't find it in scene_meta.views — data mismatch.`);
+  } catch (e) {
+    console.error('[click] error:', e);
+    setStatus('Click-to-inspect error: ' + (e.message || e));
+  }
 }
 
 function wireClickHooks() {
   document.getElementById('viewinfo-img').addEventListener('click', onPhotoClick);
-  viewer.renderer.domElement.addEventListener('click', onSceneClick);
+  // Listen at the document level rather than viewer.renderer.domElement directly —
+  // gsplat-3d's Viewer may layer additional elements/canvases over the base one, and
+  // a listener on the wrong specific element would silently never fire. Filter out
+  // clicks that originated inside any of our own UI panels.
+  document.addEventListener('click', (e) => {
+    if (e.target.closest('#panel, #minimap-wrap, #viewinfo, #status')) return;
+    onSceneClick();
+  });
 }
 
 function drawLoop() {
