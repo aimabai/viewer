@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>InfraScan — 3D Walk-Through</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1117;
+      font-family: system-ui, -apple-system, sans-serif; color: #e6edf3; }
+    .card { background: rgba(20,26,34,0.86); border: 1px solid #2b3543; border-radius: 12px; }
+    #panel { position: fixed; top: 14px; left: 14px; z-index: 10; width: 230px; padding: 13px 15px; }
+    #panel h1 { font-size: 14px; margin: 0 0 4px; }
+    #panel .sub { font-size: 11px; color: #8b98a8; margin-bottom: 11px; }
+    .label { font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: #8b98a8; margin: 0 0 6px; }
+    button.mode { display: block; width: 100%; text-align: left; margin: 4px 0; padding: 7px 10px;
+      background: #1b2330; color: #d6deea; border: 1px solid #2b3543; border-radius: 8px; font-size: 12.5px; cursor: pointer; }
+    button.mode:hover { background: #232d3d; }
+    button.mode.active { background: #2563eb; border-color: #3b82f6; color: #fff; }
+    #cov { margin-top: 10px; display: none; }
+    #cov input { width: 100%; }
+    #minimap-wrap { position: fixed; bottom: 14px; left: 14px; z-index: 10; padding: 11px; }
+    #minimap { display: block; cursor: pointer; border-radius: 6px; }
+    .legend { display: flex; gap: 11px; margin-top: 7px; font-size: 10px; color: #9aa6b6; }
+    .legend span { display: flex; align-items: center; gap: 4px; }
+    .sq { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+    .sq.path { background: #56b6ff; } .sq.cam { background: #3fb950; }
+    #viewinfo { position: fixed; top: 14px; right: 14px; z-index: 10; width: 250px; padding: 10px; display: none; }
+    #viewinfo img { width: 100%; border-radius: 6px; display: block; margin-top: 6px; }
+    #status { position: fixed; bottom: 14px; right: 14px; z-index: 10; max-width: 40vw;
+      background: rgba(20,26,34,0.8); padding: 7px 11px; border-radius: 8px; border: 1px solid #2b3543;
+      font-size: 12px; white-space: pre-wrap; color: #9aa6b6; }
+    #crosshair { position: fixed; top: 50%; left: 50%; width: 8px; height: 8px;
+      margin: -4px 0 0 -4px; border: 2px solid #ffd23f; border-radius: 50%;
+      z-index: 9; pointer-events: none; display: none; box-shadow: 0 0 4px rgba(0,0,0,.6); }
+    .hint { font-size: 10px; color: #6a7585; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <div id="crosshair"></div>
+  <div id="panel" class="card">
+    <h1>InfraScan walk-through</h1>
+    <div class="sub">depth-supervised 3D Gaussian splat</div>
+    <div class="label">Render mode</div>
+    <button class="mode active" data-mode="photographic">Photographic splats</button>
+    <button class="mode" data-mode="confidence">Confidence heat-map</button>
+    <button class="mode" data-mode="coverage">Coverage (view count)</button>
+    <button class="mode" data-mode="byview">Colour by supervising view</button>
+    <div id="cov">
+      <div class="label">Hide points seen by &lt; <span id="cov-val">1</span> views</div>
+      <input type="range" id="cov-slider" min="1" max="40" value="1" />
+    </div>
+    <label style="display:block;margin-top:10px;font-size:12px;cursor:pointer">
+      <input type="checkbox" id="toggle-planes" checked /> Inferred floor &amp; ceiling
+    </label>
+    <div class="hint">Floor: real texture extended (classical inpainting, no AI). Ceiling: flat fallback — too irregular to extrapolate honestly.</div>
+    <div class="hint">While walking: click the crosshair on a surface to see which photo reconstructed it.</div>
+  </div>
+
+  <div id="minimap-wrap" class="card">
+    <div class="label">Floor plan <span style="text-transform:none;color:#6a7585">(top-down · click to fly)</span></div>
+    <canvas id="minimap" width="260" height="400"></canvas>
+    <div class="legend">
+      <span><i class="sq path"></i>walk path</span>
+      <span><i class="sq cam"></i>you</span>
+    </div>
+  </div>
+
+  <div id="viewinfo" class="card">
+    <div class="label" id="viewinfo-label">view</div>
+    <img id="viewinfo-img" alt="perspective view" style="cursor: crosshair" />
+    <div class="hint">Click the photo to ray-cast that pixel's depth into a 3D marker.</div>
+  </div>
+
+  <div id="status">Starting…</div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

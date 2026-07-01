@@ -1,0 +1,27 @@
+# Python envs & caches
+.venv/
+__pycache__/
+*.pyc
+.hf/
+
+# Node
+node_modules/
+viewer/dist/
+
+# Dataset — DO NOT COMMIT (privacy: office photos with people; and size)
+dataset/
+prepared/
+viewer/public/views/
+viewer/public/scene/depth/
+
+# Trained models & heavy outputs (regenerate via the pipeline — see README1.md)
+outputs/
+*.pt
+
+# Large splat assets served by the viewer (regenerate via export; keep small metadata)
+viewer/public/scene/*.ply
+viewer/public/scene/*.ksplat
+
+# Scratch / logs
+*.log
+*.tar.gz
