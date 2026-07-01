@@ -31,11 +31,15 @@ completion) and why. [`docs/pipeline.png`](docs/pipeline.png) has the pipeline f
     §2 that a plain point-cloud viewer wouldn't have); click the crosshair on the 3D
     reconstruction while walking to see which of the 240 source photos supervised that
     surface,
-  - an **inferred floor** — the single-pitch capture never directly observes the floor
-    (or ceiling), so we complete it as a top-down texture via classical (non-generative)
-    inpainting of the real observed pixels, explicitly labelled as completion, not
-    invention; the ceiling is left as a flat fallback (judged too irregular to
-    extrapolate honestly this way),
+  - a **generatively-filled floor** — the single-pitch capture never directly
+    observes the floor beyond the coverage bubble (or the ceiling at all), so the
+    unobserved floor pixels are completed via mask-conditioned SDXL inpainting of a
+    top-down projection, then baked as real, flat, floor-aligned Gaussians merged
+    directly into the model (not a separate textured plane); those synthetic points
+    are tagged confidence=0/unsupervised in the trust data, so Coverage/Confidence
+    mode still correctly shows this region as generated. Ceiling is left unfilled
+    (judged too irregular for this approach). See RESEARCH.md for the precise
+    (and initially overclaimed) relationship to NVIDIA's ArtiFixer,
   - a **standalone raw-splat viewer** (`viewer/raw.html`) for opening an exported
     `.ply`/`.ksplat` file directly, separate from the full interactive walk-through.
 
@@ -89,7 +93,9 @@ python train.py --dataset ../dataset --init-ply ../prepared/init_pointcloud.ply 
 # 4. evaluate against ground truth (masked PSNR + a GT|render|depth panel).
 #    NOTE: if you trained with --refine-poses, render_eval.py automatically applies
 #    the learned per-camera correction (it's stored in the checkpoint) — evaluating
-#    without it under-reports quality by several dB (we hit this ourselves).
+#    without it under-reports quality by several dB (we hit this ourselves). NOTE:
+#    this recovered number is still training-view PSNR and is partly a training-fit
+#    artifact of the per-camera correction itself — see RESEARCH.md.
 python render_eval.py --ckpt ../outputs/full.pt --views 0,6,30,120
 
 # 5. export for the browser viewer: pruned/SH-controlled splat PLY, per-Gaussian trust
@@ -164,27 +170,69 @@ standalone raw-splat file viewer — drag and drop a `.ply`/`.ksplat`, or visit
   re-run ourselves (out of scope per the brief). Left as a documented, precisely
   diagnosed limitation rather than papered over.
 - **Floor/ceiling beyond the coverage bubble** are geometrically unconstrained by
-  definition (single-pitch, single-vantage capture — see `RESEARCH.md`). We complete
-  the floor honestly (extend real texture, no invention) and leave the ceiling flat
-  rather than fabricate detail we have no basis for.
+  definition (single-pitch, single-vantage capture — see `RESEARCH.md`). We
+  generatively complete the floor (hole pixels only, tagged as unsupervised in the
+  trust data) and leave the ceiling unfilled rather than fabricate detail with no
+  principled way to gate *where* to invent it.
+- **All reported PSNR/SSIM numbers are training-view, not held-out.** Every one of
+  the 240 views was used in training. This is the most important caveat in this
+  project — see "What I'd do with another week" for the concrete held-out-split
+  plan and what we'd expect each comparison to do under it.
+- **Our confidence-gated diffusion enhancement is not ArtiFixer's mechanism.**
+  We initially described `artifixer_enhance.py` as reproducing ArtiFixer's opacity
+  mixing; it doesn't — it's deterministic conditioning on an existing render (the
+  Difix3D+/"Fixer" family), a distinction with teeth: our own ungated test
+  hallucinated walls/ceiling that were never there, exactly the empty-region
+  failure opacity mixing exists to prevent. See RESEARCH.md for the corrected
+  characterization.
 - **2DGS was tried and rejected** for this dataset (two tuning attempts; its surface
   regularizers assume denser multi-view coverage than a single-vantage capture
   provides) — a real negative result, documented in `RESEARCH.md` rather than hidden.
 
 ## What I'd do with another week
 
-Two things would move the needle most. First, **close the reflective-surface gap
-properly** — either rent an 80 GB GPU to run the real ArtiFixer (our confidence/
-coverage channels are already exactly the control signal it needs), or add
-unsupervised distractor handling (SpotLessSplats, TOG 2025) so shadows and
-reflections stop baking in as static texture without needing masks at all. Second,
-**a rigorous held-out-view evaluation** — everything we report is training-view PSNR;
-setting up a proper eval split (holding out every Nth view, matching how prior
-approaches to this dataset were scored) would give an honest generalization number
-instead of a training-fit one, and might reveal that some of our regularization
-choices (which were conservative by design) have a real, measurable payoff that
-training-view PSNR alone doesn't show. Smaller items: an automated second-opinion
-pass to catch upstream person-detection misses like the one documented above (a
-second segmentation model or simple flow/temporal consistency check across the 12
-yaws of a scan-point would likely have caught it), and progressive/LOD splat loading
-so the full-quality model doesn't require a ~170 MB first load.
+**First, and most important: a genuine held-out-view evaluation, concretely.**
+Every PSNR/SSIM number in this project — the anti-needle result (21.5→20.7 dB), the
+2DGS comparison (21.4 vs 18.4 dB), the pose-refinement recovery — is **training-view**
+PSNR: all 240 views were used in training, none held out. That's the single biggest
+methodological gap here, and I'd fix it exactly like this: exclude every 12th view
+from training (`--eval-mode interval --eval-interval 12`, the same convention used
+elsewhere on this dataset, giving 20 held-out views spread evenly across all 20
+scan-points rather than clustered), train identically otherwise, and re-run each
+comparison PSNR-on-held-out instead of PSNR-on-training. Concretely what I'd expect
+to change: the anti-needle result should hold up or strengthen — needles overfitting
+individual training views should generalize *worse*, not better, so I'd expect the
+regularized model's held-out PSNR to beat the un-regularized one even though its
+training-view PSNR is lower, which would make the argument non-circular for the
+first time. Pose refinement is the one I expect to shrink: a per-camera correction
+is fit to its own training image and has no learned delta for a held-out pose, so
+most of the "~6 dB you lose by omitting it" is training-fit, not generalization —
+I'd isolate the genuine bundle-adjustment benefit (if any) by training pose
+corrections only on the non-held-out views and checking whether the held-out
+renders (using their *original*, uncorrected poses) still improve over a
+no-pose-refinement baseline. Also on the list: I'd re-derive the multi-view
+consistency filter's actual claim — same-scan-point yaws share one optical center
+(zero baseline), so it's a monocular self-consistency check, not real triangulation;
+worth trying a version that also cross-checks the (small, but nonzero) baseline
+between nearby scan-points to see if it catches anything the yaw-only version
+misses.
+
+**Second: close the reflective-surface gap properly, correctly scoped this time.**
+We built a confidence-gated SDXL img2img pass and initially described it as
+reproducing ArtiFixer's "opacity mixing" — it doesn't. Opacity mixing intervenes at
+the noise-initialization stage of denoising (start from the render where geometry
+exists, from noise where it doesn't) specifically so it can *generate* content in
+empty regions; what we built is deterministic conditioning on an existing render (the
+Difix3D+/"Fixer" family), which is why our own ungated test hallucinated walls/
+ceiling that were never there — precisely the failure opacity mixing exists to
+prevent. With real compute, the next step is either renting an 80 GB GPU to run
+actual ArtiFixer (our confidence/coverage channels are already the right control
+signal for its opacity map) or adding unsupervised distractor handling
+(SpotLessSplats, TOG 2025) so shadows/reflections stop baking in without needing
+masks at all.
+
+Smaller items: an automated second-opinion pass to catch upstream person-detection
+misses like the one documented above (a second segmentation model or a simple
+flow/temporal-consistency check across a scan-point's 12 yaws would likely have
+caught it), and progressive/LOD splat loading so the full-quality model doesn't
+require a ~170 MB first load.
