@@ -71,11 +71,11 @@ async function main() {
 
   // Wire up interaction BEFORE the heavy splat load — WASD, minimap, and the
   // click-to-inspect hook only need `trust` (already loaded above), not the splat
-  // mesh, so there's no reason to gate them behind a ~168 MB download.
+  // mesh, so there's no reason to gate them behind a ~100 MB download.
   wireUI();
   wireClickHooks();
   drawLoop();
-  setStatus('Loading full-quality splats (~168 MB)… (walking + click-to-inspect already work)');
+  setStatus('Loading full-quality splats (~100 MB)… (walking + click-to-inspect already work)');
 
   await viewer.addSplatScene('/scene/scene.ksplat', { showLoadingUI: true, splatAlphaRemovalThreshold: 5 });
   if (viewer.splatMesh) viewer.splatMesh.visible = (mode === 'photographic');
