@@ -137,22 +137,6 @@ This builds two pages: `/` (the full interactive viewer) and `/raw.html` (the
 standalone raw-splat file viewer — drag and drop a `.ply`/`.ksplat`, or visit
 `/raw.html?src=/scene/scene.ply`).
 
-### 5. (Optional) Window/reflection enhancement
-
-A confidence-gated image-diffusion pass that sharpens window/reflection regions
-in rendered views as an offline comparison tool (not a live viewer mode) — see
-`RESEARCH.md` §3.4 for what it is and isn't. Requires a second, isolated Python
-environment (`uv venv .venv-flux --python 3.11`, then install a modern `torch`
-+ `diffusers` + `gguf` stack — see `src/flux_enhance.py`'s docstring) since it
-needs a newer torch than `gsplat` supports. Not required for the core
-reconstruction or viewer.
-
-```bash
-cd src
-python render_for_enhance.py --ckpt ../outputs/full.pt --views 0,120,132
-../.venv-flux/bin/python3 flux_enhance.py --cache-dir ../outputs/enhance_cache --views 0,120,132
-```
-
 ## Known limitations
 
 See `RESEARCH.md` §4 for the full list with root-cause detail. Summary:
@@ -160,8 +144,9 @@ See `RESEARCH.md` §4 for the full list with root-cause detail. Summary:
 - All reported PSNR/SSIM numbers are training-view, not held-out — the single
   largest methodological gap in this project.
 - Windows, mirrors, and reflective surfaces reconstruct as soft, low-detail
-  regions; the optional enhancement pass (§5 above) is a partial, offline
-  mitigation, not a fix to the reconstruction itself.
+  regions. A confidence-gated image-diffusion enhancement pass exists as an
+  offline comparison tool (`RESEARCH.md` §3.4, `src/flux_enhance.py`) — a
+  partial, offline mitigation, not a fix to the reconstruction itself.
 - Floor/ceiling beyond the ~9×6×11m coverage bubble are geometrically
   unconstrained by definition (single-vantage capture). The floor is
   generatively completed and tagged as such; the ceiling is not filled.

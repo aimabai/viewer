@@ -112,7 +112,9 @@ function setMode(m) {
     trust.points.visible = !photographic;
     trust.material.uniforms.uMode.value = { confidence: 1, coverage: 2, byview: 3 }[m] ?? 0;
   }
-  document.getElementById('cov').style.display = m === 'coverage' ? '' : 'none';
+  // CSS sets display:none by default (see index.html); '' only clears an inline
+  // override, it does NOT beat that stylesheet rule — must set an explicit value.
+  document.getElementById('cov').style.display = m === 'coverage' ? 'block' : 'none';
   setStatus(MODE_HELP[m] || '');
 }
 
