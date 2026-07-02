@@ -39,8 +39,11 @@ const VERT = /* glsl */`
     return clamp(abs(mod(h*6.0 + vec3(0.0,4.0,2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
   }
 
+  varying float vFade;
+
   void main(){
     vDrop = 0.0;
+    vFade = 1.0;
     if (uMode == 0)      vColor = aColor;
     else if (uMode == 1) vColor = ramp(aConf);
     else if (uMode == 2) vColor = ramp(aCov);
@@ -51,8 +54,16 @@ const VERT = /* glsl */`
     if (aView < 0.0 && uMode != 0) vDrop = 1.0;          // unseen → grey in trust modes
     vec4 mv = modelViewMatrix * vec4(position, 1.0);
     gl_Position = projectionMatrix * mv;
-    // coverage mode: cull points seen by fewer than the threshold # of views
-    if (uMode == 2 && aNV < uCovThresh) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+    // Coverage mode: instead of a hard pop in/out at the threshold, fade points out
+    // over a soft band below it (in raw view-count units) so dragging the slider
+    // reads as points continuously dissolving away rather than vanishing in a snap —
+    // and points already far below the threshold are skipped via the same early-out.
+    if (uMode == 2) {
+      float band = max(1.0, uCovThresh * 0.5);
+      float t = clamp((aNV - (uCovThresh - band)) / band, 0.0, 1.0);
+      if (t <= 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+      vFade = t;
+    }
     gl_PointSize = clamp(uSize / max(-mv.z, 0.1), 1.0, 4.0);
   }
 `;
@@ -61,10 +72,11 @@ const FRAG = /* glsl */`
   precision mediump float;
   varying vec3 vColor;
   varying float vDrop;
+  varying float vFade;
   void main(){
     vec2 d = gl_PointCoord - vec2(0.5);
     if (dot(d, d) > 0.25) discard;                       // round points
-    float a = vDrop > 0.5 ? 0.15 : 1.0;
+    float a = (vDrop > 0.5 ? 0.15 : 1.0) * vFade;
     gl_FragColor = vec4(vColor, a);
   }
 `;

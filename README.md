@@ -1,308 +1,193 @@
-# Intern Take-Home — 3D Walk-Through Viewer
+# InfraScan 3D Walk-Through — Depth-Supervised Gaussian Splatting
 
-Welcome! This is a take-home task for the InfraScan team. **Budget about
-5 days of calendar time.** The implementation is deliberately open-ended;
-we care more about what you choose to ship, what you choose to skip, and
-how you communicate the result than about how many boxes you tick. There
-is no autograder.
+Turns the DA3 output in `dataset/` into a photographic 3D reconstruction and a
+browser walk-through viewer. The original task brief is preserved at
+[`docs/TASK.md`](docs/TASK.md). See [`RESEARCH.md`](RESEARCH.md) for the
+paper-grounded design decisions, the full method specification, and every
+alternative that was tried and not shipped.
 
----
+## What this is
 
-## 1 · What InfraScan does
+- **Reconstruction:** depth-supervised 3D Gaussian Splatting, trained from
+  scratch on [`gsplat`](https://github.com/nerfstudio-project/gsplat) — a
+  custom training loop, not nerfstudio/splatfacto. Masked photometric + Pearson
+  depth loss (confidence- and edge-weighted), confidence-adaptive anti-needle
+  regularization, multi-view-consistency-filtered initialization, and learned
+  per-camera pose corrections. See `RESEARCH.md` §1-2 for the exact recipe.
+- **Viewer:** three.js + `@mkkellogg/gaussian-splats-3d`:
+  - Real-time photographic splat rendering, first-person WASD + mouse-look
+    (click the scene to lock the pointer, Esc to release).
+  - Three trust-aware render modes — confidence heat-map, coverage (view-count,
+    with a continuous-fade threshold slider), colour-by-supervising-view —
+    each self-explaining in the on-screen status line.
+  - A floor-plan minimap (a real top-down density image of the reconstruction)
+    with a clickable, locally-adaptive walkable path.
+  - Bidirectional click-to-inspect: click a pixel in the shown photo to
+    ray-cast through its DA3 depth and drop a 3D marker; click a point on the
+    3D reconstruction while walking to see which of the 240 source photos
+    supervised that surface.
+  - A generatively-completed floor — the single-pitch capture never directly
+    observes the floor beyond the coverage bubble (or the ceiling at all), so
+    unobserved floor pixels are completed via mask-conditioned SDXL inpainting
+    of a top-down projection, then baked as real, flat, floor-aligned
+    Gaussians merged directly into the model. Those synthetic points are
+    tagged unsupervised in the trust data, so Coverage/Confidence mode still
+    correctly shows this region as generated.
+  - A standalone raw-splat viewer (`viewer/raw.html`) for opening an exported
+    `.ply`/`.ksplat` directly.
 
-A field tech records the inside of a building — either with a 360° camera
-(Insta360) or a tripod laser scanner. We turn that recording into a **3D
-digital twin** in the browser:
+## Setup (clean machine)
 
-- a coloured **point cloud** of the walls, floors, and ceilings,
-- the **camera poses** at every position the operator stood at, and
-- a **dense depth map** for each perspective image we sampled (where every
-  pixel knows how far it is from the camera).
+Requires: an NVIDIA GPU (developed on an RTX 3090, 24GB — CUDA 11.8 wheels are
+used, so most driver versions from the last few years work), Python 3.10,
+[`uv`](https://docs.astral.sh/uv/), and Node.js 18+.
 
-The depth maps and camera poses in this dataset come from
-[**Depth Anything v3**](https://depth-anything.com) (DA3 for short) —
-a monocular depth + pose estimator. That's what the `da3/` folder name
-refers to throughout.
+### 1. Python environment (reconstruction pipeline)
 
-Other teams at InfraScan then build on top of that: object detection,
-similarity search, higher-fidelity reconstruction. Your task is the
-foundational layer they all sit on — turn this raw output into a 3D
-reconstruction someone can actually walk through and inspect.
-
----
-
-## 2 · Your task
-
-> Take the DA3 output in `dataset/` and turn it into a **3D reconstruction
-> of the scene plus a viewer that lets a human explore it.** What
-> "reconstruction" means, what the viewer does, what functionality you
-> layer on top — those are yours to pick. **Be creative.**
-
-The floor is a working point-cloud renderer with some way to navigate
-between the 20 scan-points. That alone is fine but unexciting. We want to
-see what *you* think a good 3D scene viewer should do given this kind of
-data.
-
-**On approach — there is no required reconstruction method.**
-
-You could:
-
-- Render the existing dense point cloud nicely (a real LoD pipeline, EDL
-  shading, etc.).
-- Build a colored cloud yourself by lifting per-view depth maps into world
-  coords and accumulating across views.
-- Try TSDF fusion / Poisson reconstruction → textured mesh.
-- Train a gaussian splat or a small NeRF.
-- Something we haven't thought of.
-
-**A few honest notes if you go the splat route.** We know `ns-train
-splatfacto --data ...` and rendering the result is a ~30-minute task —
-that on its own is below the bar. What we'd care about is the engineering
-*around* it:
-
-- **The scene is dynamic** (people walking around, see §5). This is the
-  classic open problem for splats / NeRFs that assume a static scene.
-  You'll need to mask out the people (`person_mask` is provided) and
-  argue why your masking choice works. Shadows + reflections you won't
-  catch with a person mask — flagging that you noticed is itself signal.
-- **Coverage is uneven** (see §5). 20 scan-points cluster in ~1.5 m³ of a
-  ~12 × 7 × 20 m cloud. Whatever you reconstruct will only be
-  well-constrained inside that bubble. Be honest about where your
-  reconstruction works and where it doesn't, ideally in the viewer
-  itself (e.g. fade-out / "no data here" cue).
-- **Integrate it.** A splat rendered as an offline video isn't a viewer.
-
-**What you should ship — bare minimum:**
-
-1. A way to see the 3D reconstruction from arbitrary viewpoints in the
-   browser (or as a runnable native app).
-2. The 20 perspective views referenced into the 3D scene somehow — "the
-   camera stood *here* and was looking at *this*."
-3. Setup instructions in a `README.md` that work on a clean laptop.
-
-**Where to be creative** (ideas, not a checklist):
-
-- Click on a perspective view → ray-cast through the depth map → drop a
-  3D marker in the reconstruction.
-- A floor-plan minimap synced bidirectionally with the 3D view.
-- Smooth fly-through animation along the trajectory (or between any two
-  scan-points).
-- Surface normals / depth heat-map overlay; "confidence" rendering using
-  the `conf` channel from the NPZs.
-- A "what was reconstructed from what" overlay — colour points by which
-  view supervised them.
-- An obvious-in-retrospect interaction we'd never have specified.
-
-Depth of work on one or two ideas is much more interesting to us than
-checklist coverage of five.
-
-**Out of scope** — don't sink time into:
-
-- Login, multi-user, anything backend-side. Treat the dataset as static
-  files served from disk.
-- Re-running depth estimation yourself. The output is provided.
-- Productionising your splat trainer / mesh builder. A research-grade
-  result you can defend is more useful than a polished pipeline.
-
----
-
-## 3 · What's in `dataset/`
-
-```
-dataset/
-├── cameras.json           # 240 camera entries (20 scan-points × 12 yaws × 1 pitch)
-├── pointcloud.ply         # 61 MB downsampled coloured cloud (THE WHOLE FLOOR, see §5)
-├── views/                 # 240 perspective JPGs (504×504) — persons gaussian-blurred (see §5)
-├── views_mask/            # 240 PNG masks (504×504, uint8 0/255) — 255 = was-person pixel
-└── da3/
-    ├── camera_poses.txt   # 240 rows × 16 floats — row-major 4×4 camera→world matrices
-    ├── intrinsic.txt      # 240 rows × 4 floats — fx fy cx cy
-    └── results_output/
-        ├── frame_0.npz
-        ├── frame_1.npz
-        ...
-        └── frame_239.npz  # per-view depth + image + intrinsics + person_mask (see below)
+```bash
+cd viewer-project
+bash setup_env.sh          # creates .venv, installs torch cu118 + prebuilt gsplat wheel
+source .venv/bin/activate
 ```
 
-### `cameras.json` schema
+`setup_env.sh` installs gsplat's prebuilt CUDA wheel rather than compiling from
+source — no `nvcc`/system CUDA toolkit required, just a driver new enough for
+CUDA 11.8.
 
-JSON array, one entry per perspective view:
+### 2. Put the dataset in place
 
-```jsonc
-{
-  "id":    0,                            // also the frame_N.npz index
-  "pos":   [x, y, z],                    // camera origin in world coords (metres)
-  "xy":    [x, z],                       // 2D projection on the floor plane
-  "R":     [[r00,r01,r02], ...],         // 3×3 camera-to-world rotation (row-major)
-  "pano":  "views/000000_pz000_y000_normal.jpg",
-  "frame": 0,    "pitch": 0,    "yaw": 0
-}
+```
+viewer-project/dataset/       # cameras.json, pointcloud.ply, views/, views_mask/, da3/
 ```
 
-- **`pos` is in metres.** Origin is at the first scan-point.
-- **`R` is camera-to-world**: a point in the camera frame `[X,Y,Z]` lands
-  at `R @ [X,Y,Z] + pos` in world. Camera convention is OpenCV:
-  **+Z forward, +X right, +Y down**.
-- `pano` is a relative path inside `dataset/`.
+### 3. Run the reconstruction pipeline
 
-### `frame_N.npz` schema
+```bash
+cd src
 
-`np.load("frame_N.npz")` exposes:
+# 1. sanity-check the dataset
+python data.py ../dataset
 
-| key | shape | dtype | meaning |
-|---|---|---|---|
-| `image`       | (504, 504, 3) | uint8   | the perspective image the depth was computed for (persons blurred — see §5) |
-| `depth`       | (504, 504)    | float32 | metric depth per pixel, in metres (estimated by Depth Anything v3) |
-| `conf`        | (504, 504)    | float32 | DA3's per-pixel confidence (higher = trust more) |
-| `intrinsics`  | (3, 3)        | float32 | K matrix for this view |
-| `person_mask` | (504, 504)    | uint8   | 255 where the original image had a person, 0 elsewhere |
+# 2. depth-lift a colored point cloud. Two variants are used downstream:
+#    the plain one for training (regularization handles outliers directly),
+#    and a multi-view-consistency-filtered one for the floor top-down
+#    projection (more sensitive to noise; ~3.7% of points dropped).
+python init_pointcloud.py --dataset ../dataset --out ../prepared/init_pointcloud.ply
+python init_pointcloud.py --dataset ../dataset --out ../prepared/init_pointcloud_consistent.ply \
+  --consistency-check --consistency-tol 0.12
 
-### `views/` directory
+# 3. train (full run: 504x504 res, 30k iters, ~60-65 min on a 3090)
+python train.py --dataset ../dataset --init-ply ../prepared/init_pointcloud.ply \
+  --out ../outputs/full.pt --iters 30000 --sh-degree 3 --max-init-points 1000000 \
+  --depth-lambda 0.2 --aniso-lambda 0.02 --size-lambda 0.05 \
+  --refine-poses --pose-warmup 2000 --conf-gamma 1.5 \
+  --conf-reg-gamma 2.0 --reg-conf-boost 4.0 --grad-edge-scale 8.0
 
-Same images as `npz['image']` (redundant, pick whichever loader is easier).
-Filename pattern: `{scanpoint:06d}_pz{pitch:03d}_y{yaw:03d}_normal.jpg`.
+# 4. evaluate against ground truth (masked PSNR + a GT|render|depth panel).
+#    render_eval.py automatically applies the learned per-camera pose
+#    correction stored in the checkpoint if --refine-poses was used.
+python render_eval.py --ckpt ../outputs/full.pt --views 0,6,30,120
 
-### What a "scan-point" is
+# 5. export scene metadata (world-up, floor basis, walkable path) and per-view
+#    depth (for the photo-click backprojection) before the floor completion,
+#    which reads both.
+python export_meta.py --dataset ../dataset --init-ply ../prepared/init_pointcloud.ply \
+  --out ../viewer/public/scene/scene_meta.json
+python export_depth.py --dataset ../dataset --out-dir ../viewer/public/scene/depth \
+  --meta ../viewer/public/scene/scene_meta.json
 
-The operator stood at a position, the 360° camera captured the whole
-sphere, then we projected that sphere into 12 perspective views (every
-30° of yaw). So scan-point 0 has 12 entries in `cameras.json` (yaw 0 to
-330), all sharing the same `pos`.
+# 6. generatively complete the floor and produce the final scene.ply +
+#    trust.bin (per-Gaussian confidence/coverage/supervising-view for the
+#    trust-aware viewer modes) in one step.
+python inpaint_planes.py --ckpt ../outputs/full.pt --dataset ../dataset \
+  --init-ply ../prepared/init_pointcloud_consistent.ply \
+  --out-scene ../viewer/public/scene/scene.ply \
+  --out-trust ../viewer/public/scene/trust.bin \
+  --meta ../viewer/public/scene/scene_meta.json
 
----
+# 7. convert the exported .ply to gsplat-3d's compact .ksplat format
+cd ../viewer
+node scripts/ply2ksplat.mjs public/scene/scene.ply public/scene/scene.ksplat
+```
 
-## 4 · Sanity check before you start
+A trained checkpoint is not included in the repo (large binary; regenerate with
+the commands above). For a quick smoke test of the whole pipeline instead of
+the full ~65-minute run, cut `--iters 2000 --max-init-points 200000` — quality
+will be low but everything runs end-to-end in a couple of minutes.
 
-Open `dataset/cameras.json` and confirm you can:
+**Re-exporting from an already-trained checkpoint** (e.g. after retraining with
+different hyperparameters) without re-running the floor's diffusion inpainting:
+`python redeploy_from_ckpt.py --ckpt ../outputs/full.pt` reuses the cached
+`floor_texture.png` from a prior `inpaint_planes.py` run. Requires that a floor
+texture already exists.
 
-- Read all 240 entries.
-- Group them into 20 scan-points by `frame`.
-- For one scan-point, read `R` and confirm the 12 yaw views point in
-  different directions (their forward axes — third column of `R` — span
-  the unit circle on the floor plane).
+### 4. Run the viewer
 
-If any of that surprises you, ask before you start coding.
+```bash
+cd viewer
+npm install
+npm run dev        # http://localhost:10100 (see viewer/vite.config.js)
+```
 
----
+Production build:
+```bash
+npm run build && npm run preview
+```
+This builds two pages: `/` (the full interactive viewer) and `/raw.html` (the
+standalone raw-splat file viewer — drag and drop a `.ply`/`.ksplat`, or visit
+`/raw.html?src=/scene/scene.ply`).
 
-## 5 · Known dataset caveats
+### 5. (Optional) Window/reflection enhancement
 
-So you don't blame your code:
+A confidence-gated image-diffusion pass that sharpens window/reflection regions
+in rendered views as an offline comparison tool (not a live viewer mode) — see
+`RESEARCH.md` §3.4 for what it is and isn't. Requires a second, isolated Python
+environment (`uv venv .venv-flux --python 3.11`, then install a modern `torch`
++ `diffusers` + `gguf` stack — see `src/flux_enhance.py`'s docstring) since it
+needs a newer torch than `gsplat` supports. Not required for the core
+reconstruction or viewer.
 
-- **The point cloud covers the whole floor (~12 m × 20 m); the 20 views
-  cluster in roughly a 1.5 m³ region** at one end of it. Most of the
-  cloud is correct geometry but was *not* seen by the views you have.
-  This is fine for a viewer — just don't expect every part of the cloud
-  to be lit by a view.
-- **Single pitch (`pz000` only).** All 240 views look horizontal.
-  Ceiling and floor have no dedicated coverage; depth there is whatever
-  spilled in from the horizon views.
-- **504×504 perspective resolution** is low by modern standards. Texture
-  detail is what it is.
-- **`depth` is camera-local z-depth** (top-to-bottom, matches the image),
-  in metres. To project pixel `(u, v)` to 3D in the camera frame:
-  `X = (u - cx) * depth / fx`, similar for `Y`, `Z = depth`. Then apply
-  `R @ [X,Y,Z] + pos` to get the world point.
-- **Persons in the views have been gaussian-blurred** for privacy (this
-  is an active office). 67 % of the views contained at least one person.
-  Masks came from YOLOv8m-seg (instance segmentation, not bounding box),
-  dilated by 4 px for safety, then used both to drive the blur and as the
-  shipped mask. Average masked region is ≈ 3.3 % of the frame — tight
-  silhouettes, no padding waste — so background pixels next to where
-  someone stood are still sharp.
+```bash
+cd src
+python render_for_enhance.py --ckpt ../outputs/full.pt --views 0,120,132
+../.venv-flux/bin/python3 flux_enhance.py --cache-dir ../outputs/enhance_cache --views 0,120,132
+```
 
-  The masks ship in two redundant places (same data):
-  - `views_mask/<same-filename>.png` — uint8 504×504, 255 = "this pixel
-    was a person in the original capture", 0 elsewhere.
-  - `frame_N.npz["person_mask"]` — same array inside the NPZ.
+## Known limitations
 
-  How you'd use them:
+See `RESEARCH.md` §4 for the full list with root-cause detail. Summary:
 
-  - **Any reconstruction method that assumes a static scene** (splats,
-    NeRFs, TSDF fusion, multi-view stereo). Pass the *inverse* mask as a
-    per-pixel loss / weight mask (i.e. `1 - person_mask`). The
-    reconstruction is then supervised only on static scene pixels; the
-    wall behind a person in one view is learned from other views where
-    it's visible. Without masking, the blurred blobs get baked in as
-    colored static artifacts. Most libraries (gsplat, nerfstudio,
-    open3d's TSDF integrator) accept either an alpha channel in the
-    image or a separate `mask.png`. Heads-up: shadows on the floor and
-    reflections in monitors / glass are *not* masked — they'll be
-    reconstructed as static texture. Noticing that in your write-up is
-    signal we like.
-  - **Tagging / detection UI.** Overlay the mask as a semi-transparent
-    red layer so a user knows which pixels were anonymized vs. real
-    texture — useful when explaining "why is this region blurry?"
+- All reported PSNR/SSIM numbers are training-view, not held-out — the single
+  largest methodological gap in this project.
+- Windows, mirrors, and reflective surfaces reconstruct as soft, low-detail
+  regions; the optional enhancement pass (§5 above) is a partial, offline
+  mitigation, not a fix to the reconstruction itself.
+- Floor/ceiling beyond the ~9×6×11m coverage bubble are geometrically
+  unconstrained by definition (single-vantage capture). The floor is
+  generatively completed and tagged as such; the ceiling is not filled.
+- One person (visible at yaw 240 across every scan-point) was missed entirely
+  by the provided YOLOv8m-seg masks in one source frame — root-caused, not
+  papered over.
+- Floater-pruning by view-provenance is implemented but disabled by default —
+  a fixed-distance version regressed on live testing (see `RESEARCH.md` §3.2).
 
----
+## What I'd do with another week
 
-## 6 · Where this fits (downstream context)
+**A genuine held-out-view evaluation.** Every comparison in `RESEARCH.md` is
+training-view PSNR. Exclude every 12th view from training (20 held-out views
+spread across all 20 scan-points), train identically otherwise, and re-run
+each comparison on the excluded views. Expected direction of change is
+documented in `RESEARCH.md` §4.
 
-So you understand what your viewer feeds into:
+**A validated floater-pruning fix.** The density-adaptive version prototyped in
+`RESEARCH.md` §3.2 needs verification beyond a single rendered comparison
+before shipping — a proper before/after sweep across many views, not just the
+one that reproduced the original complaint.
 
-- **Object tagging.** The viewer also acts as a labelling tool — a user
-  clicks an object in a view, names it ("Vent — Type A"), and we store
-  the visual embedding so the same kind of object can be auto-found in
-  other views. A click-on-view hook that returns `(view_id, pixel_x,
-  pixel_y)` (and optionally backprojects to world coords via `depth`) is
-  the substrate this needs.
-- **Auto-tagging / detection.** A vision model (currently FastSAM +
-  DINOv2) runs over every view, proposes objects, indexes them in
-  FAISS. The viewer's job is then to render those detections on the
-  perspective image (boxes / masks) and on the 3D scene (markers at the
-  backprojected positions).
-- **Higher-fidelity reconstruction.** Today the digital twin is a
-  point cloud. We're interested in upgrading to gaussian splat / NeRF /
-  textured-mesh outputs so the walkthrough looks photographic instead
-  of dotty — see §2 if you want to take a swing at it.
+**Real ArtiFixer or an equivalent opacity-mixing model**, given an 80GB-class
+GPU — the confidence/coverage channels already computed for the trust-aware
+viewer are the right control signal for it (`RESEARCH.md` §3.4).
 
-You don't need to implement any of these. They're here so you know what
-"a good viewer" eventually has to support; design the foundations
-accordingly.
-
-[gsplat]: https://github.com/nerfstudio-project/gsplat
-[nerfstudio]: https://docs.nerf.studio/
-
----
-
-## 7 · What we're looking for
-
-| Dimension | What good looks like |
-|---|---|
-| **It works** | Setup is documented. We can run it on a clean laptop without DM'ing you. The bare minimum from §2 works end-to-end. |
-| **Code quality** | Idiomatic for whatever stack you pick. Small, focused, easy to follow. |
-| **Judgement** | What did you choose to leave out, and why? A note on one trade-off you made is worth a screen of code. |
-| **Communication** | A short Loom or written walkthrough at the end. What works, what's broken, what you'd build next with another week. |
-
-**Anti-patterns** we've seen:
-
-- All the time spent on visual polish, depth NPZs never opened.
-- Hard-coding values that only work on this scan (path lengths, point
-  cloud bounds, scanpoint count).
-- Re-implementing a `.ply` loader instead of using `three.js`'s `PLYLoader`.
-- Adding dependencies (auth, state libraries, build pipelines) the task
-  doesn't need.
-
----
-
-## 8 · Stack / tooling
-
-**Free choice.** Most candidates pick `three.js` because the point-cloud
-ecosystem is rich there, but `babylon.js`, `react-three-fiber`, a
-WebGL/WGPU project, or even native (Open3D, Blender add-on) are all fine.
-Be explicit about how we run whatever you build.
-
----
-
-## 9 · Deliverables
-
-- A git repo (zip is fine if you can't share access).
-- `README.md` at the root: setup instructions + one paragraph on what
-  you'd do with another week.
-- A short video or markdown walkthrough.
-
-Send to: chan@infrascan-ai.com — or the recruiter who briefed you.
-
-Good luck. Have fun with it.
-
-— Chan, InfraScan team
+Smaller items: a second-opinion detector or per-scan-point temporal-consistency
+check to catch upstream person-detection misses automatically; progressive/LOD
+splat loading so the full-quality model doesn't require a ~100MB first load.

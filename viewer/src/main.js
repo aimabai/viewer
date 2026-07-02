@@ -100,7 +100,7 @@ function wireUI() {
 const MODE_HELP = {
   photographic: 'Drag to orbit · scroll to zoom · click the path to walk through',
   confidence: 'Point colour = DA3 depth confidence (blue = low → red = high). Reds are where the depth prior was most trusted.',
-  coverage: 'Point colour = how many of the 240 photos saw each point (red = many). The slider hides barely-seen points — what falls away is the low-trust region.',
+  coverage: 'Point colour = how many of the 240 photos saw each point (red = many). Drag the slider — barely-seen points dissolve out continuously as you raise the threshold, revealing the low-trust region.',
   byview: 'Each colour = one of the 240 source photos; the colour of a surface = which photo reconstructed it. Because capture is one rotating vantage, you see the ~12 yaw "wedges" tiling the room.',
 };
 

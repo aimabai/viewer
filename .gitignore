@@ -1,5 +1,6 @@
 # Python envs & caches
 .venv/
+.venv-flux/
 __pycache__/
 *.pyc
 .hf/
@@ -14,13 +15,15 @@ prepared/
 viewer/public/views/
 viewer/public/scene/depth/
 
-# Trained models & heavy outputs (regenerate via the pipeline — see README1.md)
+# Trained models & heavy outputs (regenerate via the pipeline — see README.md)
 outputs/
 *.pt
 
 # Large splat assets served by the viewer (regenerate via export; keep small metadata)
 viewer/public/scene/*.ply
 viewer/public/scene/*.ksplat
+
+# Curated evidence images ARE tracked (docs/*.png) — only the raw outputs/ dump is ignored
 
 # Scratch / logs
 *.log

@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from plyfile import PlyData, PlyElement
+from scipy.spatial import cKDTree
 
 from data import load_views
 
@@ -104,6 +105,28 @@ def compute_provenance(means: torch.Tensor, views, max_depth: float,
     return (conf_out.cpu().numpy(), best_view.cpu().numpy(), n_views.cpu().numpy())
 
 
+def prune_floaters(means: np.ndarray, n_views: np.ndarray, dist_thresh: float) -> np.ndarray:
+    """Boolean keep-mask that drops genuine floaters: Gaussians that are BOTH never
+    confirmed by the depth-consistency check (n_views==0) AND spatially isolated
+    from any confirmed surface (> dist_thresh from the nearest n_views>=1 point).
+
+    Neither signal alone is a good floater test on its own — most n_views==0
+    points sit within a few cm of real geometry (they just missed the strict
+    depth-consistency tolerance) and pruning all of them would strip real detail;
+    requiring BOTH "never confirmed" and "far from anything that was" is a much
+    more targeted floater signal (see RESEARCH.md's floater-pruning section for
+    the measured distance distribution that motivated the default threshold)."""
+    seen = n_views >= 1
+    if not seen.any() or seen.all():
+        return np.ones(len(means), dtype=bool)
+    tree = cKDTree(means[seen])
+    d, _ = tree.query(means[~seen], k=1)
+    isolated = np.zeros(len(means), dtype=bool)
+    unseen_idx = np.nonzero(~seen)[0]
+    isolated[unseen_idx[d > dist_thresh]] = True
+    return ~isolated
+
+
 def write_ply(path, means, sh0, shN, opacities, scales, quats):
     """Standard INRIA/3DGS .ply (no custom fields, for max loader compatibility).
     Provenance for the viewer lives in trust.bin instead."""
@@ -145,6 +168,14 @@ def main():
     ap.add_argument("--device", default="cuda", help="cuda or cpu (cpu avoids contending with a running train)")
     ap.add_argument("--min-opacity", type=float, default=0.02, help="prune Gaussians below this opacity")
     ap.add_argument("--max-scale", type=float, default=0.5, help="prune Gaussians with max-scale (m) above this")
+    ap.add_argument("--floater-dist", type=float, default=0.0,
+                    help="prune Gaussians with n_views==0 AND farther than this (m) "
+                         "from the nearest depth-confirmed point — genuine floaters, "
+                         "not just near-surface points that missed the consistency "
+                         "check. 0 disables (default: the fixed-threshold version "
+                         "over-prunes sparse-but-legitimate far geometry — see "
+                         "RESEARCH.md — so it's opt-in until a density-adaptive "
+                         "version replaces it)")
     ap.add_argument("--trust-bin", default="viewer/public/scene/trust.bin",
                     help="compact point cloud for trust-rendering modes ('' to skip)")
     ap.add_argument("--trust-points", type=int, default=400_000, help="max points in trust.bin")
@@ -172,6 +203,18 @@ def main():
     print(f"computing provenance over {len(views)} views...")
     conf, sview, nv = compute_provenance(means, views, args.max_depth, args.depth_tol,
                                         args.device, refined_c2w)
+
+    if args.floater_dist > 0:
+        means_np = means.numpy()
+        keep2 = prune_floaters(means_np, nv, args.floater_dist)
+        n1 = len(means_np)
+        means, sh0, shN = means[keep2], sh0[keep2], shN[keep2]
+        opac, scales, quats = opac[keep2], scales[keep2], quats[keep2]
+        conf, sview, nv = conf[keep2], sview[keep2], nv[keep2]
+        print(f"floater prune: {n1:,} -> {len(means):,} "
+              f"({n1 - len(means):,} isolated unconfirmed points removed, "
+              f">{args.floater_dist*100:.0f}cm from the nearest confirmed surface)")
+
     write_ply(args.out, means.numpy(), sh0.numpy(), shN.numpy(),
               opac.numpy(), scales.numpy(), quats.numpy())
     pct_seen = 100.0 * (sview >= 0).mean()

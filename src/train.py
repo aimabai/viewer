@@ -59,6 +59,20 @@ def ssim(a: torch.Tensor, b: torch.Tensor, win: torch.Tensor) -> torch.Tensor:
     return (num / den).mean()
 
 
+def image_gradient_weight(img: torch.Tensor, scale: float) -> torch.Tensor:
+    """exp(-scale * |grad(I)|), DN-Splatter's edge-downweighting term (RESEARCH.md):
+    depth supervision is least reliable at RGB edges/occlusion boundaries (that's
+    exactly where monocular depth over-smooths), so trust it less there and let the
+    photometric loss — which sees the sharp edge directly — drive the geometry
+    instead. `img` is (H,W,3) in [0,1]; returns (H,W) in (0,1]."""
+    gray = img.mean(dim=-1)
+    gx = torch.zeros_like(gray); gy = torch.zeros_like(gray)
+    gx[:, :-1] = gray[:, 1:] - gray[:, :-1]
+    gy[:-1, :] = gray[1:, :] - gray[:-1, :]
+    grad_mag = torch.sqrt(gx * gx + gy * gy + 1e-8)
+    return torch.exp(-scale * grad_mag)
+
+
 def pearson_depth_loss(d_render, d_gt, weight):
     """1 - weighted Pearson correlation between rendered and DA3 depth.
 
@@ -177,6 +191,21 @@ def main():
                     help="sharpen per-pixel confidence weighting in the depth loss: "
                          "weight = conf**gamma (>1 pushes low-confidence pixels toward "
                          "zero weight harder, without hard-dropping whole frames)")
+    ap.add_argument("--grad-edge-scale", type=float, default=8.0,
+                    help="DN-Splatter edge-downweighting: depth-loss weight *= "
+                         "exp(-scale * |grad(RGB)|), so sharp RGB edges (where "
+                         "monocular depth over-smooths) get less depth supervision "
+                         "and more freedom to be fit by the photometric loss instead. "
+                         "0 disables (uniform weight 1, recovers prior behaviour)")
+    ap.add_argument("--conf-reg-gamma", type=float, default=2.0,
+                    help="sharpen the confidence-adaptive regularization weight: "
+                         "distrust = (1-conf)**gamma sampled at each visible Gaussian's "
+                         "projected pixel")
+    ap.add_argument("--reg-conf-boost", type=float, default=4.0,
+                    help="extra anti-needle/size regularization strength in low-confidence "
+                         "regions, on top of the flat --aniso-lambda/--size-lambda base "
+                         "(0 disables confidence-adaptivity, recovering the old uniform "
+                         "per-Gaussian penalty)")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed); np.random.seed(args.seed)
@@ -273,16 +302,35 @@ def main():
         photo = (1 - args.ssim_lambda) * l1 + args.ssim_lambda * dssim
 
         conf_w = conf.pow(args.conf_gamma) if args.conf_gamma != 1.0 else conf
-        dweight = m * conf_w * ((depth > 0) & (depth < args.max_depth)).float()
+        edge_w = image_gradient_weight(img, args.grad_edge_scale) if args.grad_edge_scale > 0 else 1.0
+        dweight = m * conf_w * edge_w * ((depth > 0) & (depth < args.max_depth)).float()
         depth_loss = pearson_depth_loss(d_r[0], depth, dweight)
 
         # Anti-needle regularization: penalize elongated (anisotropic) and oversized
         # Gaussians, the source of the spike artifacts in this sparse-view scene.
+        # Confidence-adaptive (extension beyond the flat penalty): only the Gaussians
+        # actually visible in THIS view are regularized (packed rasterization gives
+        # their global indices + projected pixel for free), and the penalty is boosted
+        # where DA3 was unsure. Previously every Gaussian was pushed toward the same
+        # cap regardless of how much we trusted the depth that placed it there — this
+        # lets confident regions stay sharp/anisotropic while uncertain regions get
+        # pushed harder toward small, round (conservative) geometry.
         sc = torch.exp(params["scales"])
-        smax = sc.max(dim=1).values
-        smin = sc.min(dim=1).values
-        reg_aniso = torch.relu(smax / (smin + 1e-6) - args.max_aniso).mean()
-        reg_size = torch.relu(smax - args.max_scale).mean()
+        gids = info["gaussian_ids"]
+        xy = info["means2d"]                                        # (nnz,2) pixel coords
+        gx = (xy[:, 0] / max(W - 1, 1)) * 2 - 1
+        gy = (xy[:, 1] / max(H - 1, 1)) * 2 - 1
+        grid = torch.stack([gx, gy], dim=-1)[None, :, None, :]      # (1,nnz,1,2)
+        conf_vis = F.grid_sample(conf[None, None], grid, mode="bilinear",
+                                  align_corners=True, padding_mode="border")[0, 0, :, 0]
+        distrust = (1.0 - conf_vis).clamp(0, 1).pow(args.conf_reg_gamma)
+        reg_weight = 1.0 + args.reg_conf_boost * distrust             # >=1, higher where unsure
+
+        sc_vis = sc[gids]
+        smax_vis = sc_vis.max(dim=1).values
+        smin_vis = sc_vis.min(dim=1).values
+        reg_aniso = (reg_weight * torch.relu(smax_vis / (smin_vis + 1e-6) - args.max_aniso)).mean()
+        reg_size = (reg_weight * torch.relu(smax_vis - args.max_scale)).mean()
         loss = photo + args.depth_lambda * depth_loss + \
             args.aniso_lambda * reg_aniso + args.size_lambda * reg_size
         if refining:
